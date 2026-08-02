@@ -4,7 +4,29 @@ import { pgTable, uuid, varchar, timestamp } from 'drizzle-orm/pg-core';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import * as cookie from 'cookie';
+
+function parseCookie(str) {
+  if (!str) return {};
+  return str.split(';').reduce((res, c) => {
+    const parts = c.split('=');
+    const key = parts[0].trim();
+    if (!key) return res;
+    const val = parts.slice(1).join('=').trim();
+    res[key] = decodeURIComponent(val);
+    return res;
+  }, {});
+}
+
+function serializeCookie(name, val, options = {}) {
+  let str = `${name}=${encodeURIComponent(val)}`;
+  if (options.maxAge) str += `; Max-Age=${options.maxAge}`;
+  if (options.path) str += `; Path=${options.path}`;
+  if (options.httpOnly) str += `; HttpOnly`;
+  if (options.sameSite) str += `; SameSite=${options.sameSite}`;
+  if (options.secure) str += `; Secure`;
+  if (options.expires) str += `; Expires=${options.expires.toUTCString()}`;
+  return str;
+}
 
 // ─── Inline schema ─────────────────────────────────────────────────────────────
 const shops = pgTable('shops', {
@@ -32,11 +54,11 @@ function getDb() {
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-dev';
 
 function setCookieHeader(res, token) {
-  res.setHeader('Set-Cookie', cookie.serialize('auth_token', token, {
+  res.setHeader('Set-Cookie', serializeCookie('auth_token', token, {
     httpOnly: true,
     path: '/',
     maxAge: 604800,
-    sameSite: 'lax',
+    sameSite: 'Lax',
     secure: process.env.NODE_ENV === 'production',
   }));
 }
@@ -112,13 +134,13 @@ export default async function handler(req, res) {
 
     // ── LOGOUT ─────────────────────────────────────────────────────────────────
     if (req.method === 'POST' && action === 'logout') {
-      res.setHeader('Set-Cookie', cookie.serialize('auth_token', '', { httpOnly: true, path: '/', expires: new Date(0) }));
+      res.setHeader('Set-Cookie', serializeCookie('auth_token', '', { httpOnly: true, path: '/', expires: new Date(0) }));
       return res.status(200).json({ success: true });
     }
 
     // ── ME ─────────────────────────────────────────────────────────────────────
     if (req.method === 'GET' && action === 'me') {
-      const cookies = cookie.parse(req.headers.cookie || '');
+      const cookies = parseCookie(req.headers.cookie || '');
       const token = cookies.auth_token;
       if (!token) return res.status(200).json({ user: null });
 
@@ -133,7 +155,7 @@ export default async function handler(req, res) {
 
     // ── CREATE SHOPKEEPER ──────────────────────────────────────────────────────
     if (req.method === 'POST' && action === 'create-shopkeeper') {
-      const cookies = cookie.parse(req.headers.cookie || '');
+      const cookies = parseCookie(req.headers.cookie || '');
       const token = cookies.auth_token;
       if (!token) return res.status(401).json({ error: 'Unauthorized' });
 

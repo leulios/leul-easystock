@@ -3,7 +3,18 @@ import { drizzle } from 'drizzle-orm/neon-http';
 import { pgTable, uuid, varchar, text, timestamp, integer, numeric } from 'drizzle-orm/pg-core';
 import { eq, and, desc, asc } from 'drizzle-orm';
 import jwt from 'jsonwebtoken';
-import * as cookie from 'cookie';
+
+function parseCookie(str) {
+  if (!str) return {};
+  return str.split(';').reduce((res, c) => {
+    const parts = c.split('=');
+    const key = parts[0].trim();
+    if (!key) return res;
+    const val = parts.slice(1).join('=').trim();
+    res[key] = decodeURIComponent(val);
+    return res;
+  }, {});
+}
 
 // ─── Inline schema ─────────────────────────────────────────────────────────────
 const shops    = pgTable('shops',    { id: uuid('id').primaryKey(), name: varchar('name',{length:255}), code: varchar('code',{length:50}), createdAt: timestamp('created_at') });
@@ -29,7 +40,7 @@ function getDb() {
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-dev';
 
 function requireAuth(req, res) {
-  const cookies = cookie.parse(req.headers.cookie || '');
+  const cookies = parseCookie(req.headers.cookie || '');
   const token = cookies.auth_token;
   if (!token) { res.status(401).json({ error: 'Unauthorized' }); return null; }
   try { return jwt.verify(token, JWT_SECRET); }
