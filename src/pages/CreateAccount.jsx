@@ -53,7 +53,7 @@ export default function CreateAccount() {
             email: form.email.trim(),
             password: form.password,
             options: {
-                data: { full_name: form.full_name.trim() },
+                data: { full_name: form.full_name.trim(), business_name: form.business_name.trim() },
             },
         });
 
@@ -63,28 +63,9 @@ export default function CreateAccount() {
             return;
         }
 
-        // Upsert profile record with the chosen role
-        if (data?.user) {
-            await supabase.from('profiles').upsert({
-                id: data.user.id,
-                full_name: form.full_name.trim(),
-                role: form.role,
-            });
-
-            // Create a shop if owner and business name is provided
-            if (form.role === 'owner') {
-                const code = generateCompanyCode();
-                const shopName = form.business_name.trim() || `${form.full_name.trim()}'s Shop`;
-                const { data: shop } = await supabase
-                    .from('shops')
-                    .insert({ name: shopName, code })
-                    .select()
-                    .single();
-                if (shop) {
-                    await supabase.from('profiles').update({ shop_id: shop.id }).eq('id', data.user.id);
-                    setCompanyCode(code);
-                }
-            }
+        // The profile and shop were automatically created by our Vercel API
+        if (data?.shop) {
+            setCompanyCode(data.shop.code);
         }
 
         setLoading(false);

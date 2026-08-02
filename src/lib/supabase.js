@@ -114,12 +114,12 @@ export const supabase = {
           email, 
           password, 
           fullName: options?.data?.full_name,
-          shopName: 'My Shop' // Simplification
+          shopName: options?.data?.business_name || 'My Shop'
         })
       });
       const data = await res.json();
       if (!res.ok) return { error: new Error(data.error) };
-      return { data: { user: data.user }, error: null };
+      return { data: { user: data.user, shop: data.shop }, error: null };
     },
     async signOut() {
       await fetch('/api/auth?action=logout', { method: 'POST' });
