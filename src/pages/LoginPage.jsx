@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Eye, EyeOff, ShieldCheck, ShoppingBag, CheckCircle, Hash } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { supabase } from '../lib/supabase';
 
 export default function LoginPage() {
     const [role, setRole] = useState('owner');
@@ -47,21 +46,8 @@ export default function LoginPage() {
             return;
         }
 
-        if (data?.user) {
-            const { data: profile } = await supabase
-                .from('profiles')
-                .select('role')
-                .eq('id', data.user.id)
-                .single();
-
-            if (profile && profile.role !== role) {
-                // If they are a shopkeeper but logged in via the Owner tab (because they have an old email account)
-                // We'll allow it, but we won't throw an error. The app will route them to /sales anyway.
-                // However, if an owner tries to use the shopkeeper tab (unlikely since it requires employee ID), we'll let it pass but they get routed to Dashboard.
-                // To be safe, we just let AuthContext.jsx and App.jsx handle the routing based on profile.role.
-            }
-        }
-
+        // Login successful — AuthContext has already updated the user state.
+        // App.jsx routing will handle the redirect automatically.
         setLoading(false);
     };
 

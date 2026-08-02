@@ -1,98 +1,112 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 
 const AuthContext = createContext({});
 
+// ─── Simple API helpers ────────────────────────────────────────────────────────
+async function apiFetch(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    ...options,
+  });
+  return res.json();
+}
+
 export function AuthProvider({ children }) {
-    const [user, setUser] = useState(null);
-    const [profile, setProfile] = useState(null);
-    const [shop, setShop] = useState(null);
-    const [loading, setLoading] = useState(true);
-    const lastUserIdRef = useRef(null);
+  const [user, setUser]       = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [shop, setShop]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const lastIdRef             = useRef(null);
 
-    async function fetchProfile(userId) {
-        if (!userId || userId === lastUserIdRef.current) return;
-        lastUserIdRef.current = userId;
-        const { data } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', userId)
-            .single();
-        setProfile(data);
+  // ── Fetch full profile + shop after we know who's logged in ─────────────────
+  const loadProfileAndShop = useCallback(async (loggedInUser) => {
+    if (!loggedInUser || loggedInUser.id === lastIdRef.current) return;
+    lastIdRef.current = loggedInUser.id;
 
-        // Fetch the shop linked to this profile
-        if (data?.shop_id) {
-            const { data: shopData } = await supabase
-                .from('shops')
-                .select('*')
-                .eq('id', data.shop_id)
-                .single();
-            setShop(shopData ?? null);
-        } else {
-            setShop(null);
-        }
+    try {
+      // Profile is embedded in user object from our API
+      const profileData = loggedInUser;
+      setProfile(profileData);
+
+      // Fetch shop separately using shop_id
+      if (loggedInUser.shopId || loggedInUser.shop_id) {
+        const shopId = loggedInUser.shopId || loggedInUser.shop_id;
+        const res = await apiFetch(`/api/db?table=shops&id=${shopId}`);
+        setShop(res.data ?? null);
+      } else {
+        setShop(null);
+      }
+    } catch {
+      setProfile(loggedInUser);
+      setShop(null);
     }
+  }, []);
 
-    useEffect(() => {
-        // Safety net: never hang on loading longer than 6 seconds
-        const timeout = setTimeout(() => setLoading(false), 6000);
+  // ── On mount: check if session already exists ───────────────────────────────
+  useEffect(() => {
+    const timeout = setTimeout(() => setLoading(false), 6000); // safety net
 
-        // Eagerly resolve the session so the app never gets stuck on loading
-        supabase.auth.getSession().then(async ({ data: { session } }) => {
-            clearTimeout(timeout);
-            setUser(session?.user ?? null);
-            if (session?.user) {
-                await fetchProfile(session.user.id);
-            } else {
-                setProfile(null);
-                setShop(null);
-            }
-            setLoading(false);
-        }).catch(() => {
-            clearTimeout(timeout);
-            setLoading(false);
-        });
+    apiFetch('/api/auth?action=me')
+      .then(async (res) => {
+        clearTimeout(timeout);
+        if (res.user) {
+          setUser(res.user);
+          await loadProfileAndShop(res.user);
+        } else {
+          setUser(null);
+          setProfile(null);
+          setShop(null);
+        }
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+      })
+      .finally(() => setLoading(false));
 
-        // Subscribe to future auth changes (login / logout)
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-            const newUser = session?.user ?? null;
-            setUser(newUser);
-            if (newUser) {
-                await fetchProfile(newUser.id);
-            } else {
-                lastUserIdRef.current = null;
-                setProfile(null);
-                setShop(null);
-            }
-            // Only clear loading if it's still true (first call handled above)
-            setLoading(false);
-        });
+    return () => clearTimeout(timeout);
+  }, [loadProfileAndShop]);
 
-        return () => { clearTimeout(timeout); subscription.unsubscribe(); };
-    }, []);
+  // ── signIn ──────────────────────────────────────────────────────────────────
+  const signIn = async (email, password) => {
+    try {
+      const res = await apiFetch('/api/auth?action=login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      });
 
-    const signIn = async (email, password) => {
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        return { data, error };
-    };
+      if (res.error) return { data: null, error: new Error(res.error) };
 
-    const signOut = async () => {
-        lastUserIdRef.current = null;
-        await supabase.auth.signOut();
-    };
+      setUser(res.user);
+      lastIdRef.current = null; // allow re-fetch
+      await loadProfileAndShop(res.user);
+      return { data: { user: res.user }, error: null };
+    } catch (err) {
+      return { data: null, error: err };
+    }
+  };
 
-    // Role helpers (derived from profile)
-    const activeRole = profile?.role || (user ? 'owner' : null); // Fallback to owner if profile isn't loaded yet, though normally we'd wait for profile
-    const isOwner = activeRole === 'owner';
-    const isAdmin = isOwner;
-    const isManager = activeRole === 'owner' || activeRole === 'manager';
-    const isStaff = ['owner', 'manager', 'shopkeeper'].includes(activeRole);
+  // ── signOut ─────────────────────────────────────────────────────────────────
+  const signOut = async () => {
+    await apiFetch('/api/auth?action=logout', { method: 'POST' });
+    setUser(null);
+    setProfile(null);
+    setShop(null);
+    lastIdRef.current = null;
+  };
 
-    return (
-        <AuthContext.Provider value={{ user, profile, shop, loading, signIn, signOut, isOwner, isAdmin, isManager, isStaff }}>
-            {children}
-        </AuthContext.Provider>
-    );
+  // ── Role helpers ─────────────────────────────────────────────────────────────
+  const activeRole  = profile?.role ?? (user ? 'owner' : null);
+  const isOwner     = activeRole === 'owner';
+  const isAdmin     = isOwner;
+  const isManager   = activeRole === 'owner' || activeRole === 'manager';
+  const isStaff     = ['owner', 'manager', 'shopkeeper'].includes(activeRole);
+
+  return (
+    <AuthContext.Provider value={{ user, profile, shop, loading, signIn, signOut, isOwner, isAdmin, isManager, isStaff }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export const useAuth = () => useContext(AuthContext);
