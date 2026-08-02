@@ -1,101 +1,98 @@
-import { db } from '../src/db/index.js';
-import * as schema from '../src/db/schema.js';
-import { requireAuth } from './_auth.js';
-import { eq, and, desc, asc, gte } from 'drizzle-orm';
+import { neon } from '@neondatabase/serverless';
+import { drizzle } from 'drizzle-orm/neon-http';
+import { pgTable, uuid, varchar, text, timestamp, integer, numeric } from 'drizzle-orm/pg-core';
+import { eq, and, desc, asc } from 'drizzle-orm';
+import jwt from 'jsonwebtoken';
+import cookie from 'cookie';
 
+// ─── Inline schema ─────────────────────────────────────────────────────────────
+const shops    = pgTable('shops',    { id: uuid('id').primaryKey(), name: varchar('name',{length:255}), code: varchar('code',{length:50}), createdAt: timestamp('created_at') });
+const profiles = pgTable('profiles', { id: uuid('id').primaryKey(), fullName: varchar('full_name',{length:255}), role: varchar('role',{length:50}), shopId: uuid('shop_id'), email: varchar('email',{length:255}), passwordHash: varchar('password_hash',{length:255}), createdAt: timestamp('created_at') });
+const products = pgTable('products', { id: uuid('id').primaryKey(), name: varchar('name',{length:255}), sku: varchar('sku',{length:100}), category: varchar('category',{length:100}), description: text('description'), unitPrice: numeric('unit_price',{precision:12,scale:2}), lowStockThreshold: integer('low_stock_threshold'), quantity: integer('quantity'), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const productVariants = pgTable('product_variants', { id: uuid('id').primaryKey(), productId: uuid('product_id'), name: varchar('name',{length:255}), sku: varchar('sku',{length:100}), unitPrice: numeric('unit_price',{precision:12,scale:2}), quantity: integer('quantity'), shopId: uuid('shop_id') });
+const suppliers = pgTable('suppliers', { id: uuid('id').primaryKey(), name: varchar('name',{length:255}), contact: varchar('contact',{length:255}), email: varchar('email',{length:255}), phone: varchar('phone',{length:50}), address: text('address'), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const customers = pgTable('customers', { id: uuid('id').primaryKey(), name: varchar('name',{length:255}), phone: varchar('phone',{length:50}), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const purchaseOrders = pgTable('purchase_orders', { id: uuid('id').primaryKey(), orderNumber: varchar('order_number',{length:100}), supplierId: uuid('supplier_id'), productId: uuid('product_id'), quantity: integer('quantity'), unitCost: numeric('unit_cost',{precision:12,scale:2}), totalCost: numeric('total_cost',{precision:12,scale:2}), status: varchar('status',{length:50}), expectedAt: timestamp('expected_at'), notes: text('notes'), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const salesOrders = pgTable('sales_orders', { id: uuid('id').primaryKey(), orderNumber: varchar('order_number',{length:100}), customerId: uuid('customer_id'), status: varchar('status',{length:50}), subtotal: numeric('subtotal',{precision:12,scale:2}), taxRate: numeric('tax_rate',{precision:5,scale:2}), taxAmount: numeric('tax_amount',{precision:12,scale:2}), total: numeric('total',{precision:12,scale:2}), notes: text('notes'), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const salesOrderItems = pgTable('sales_order_items', { id: uuid('id').primaryKey(), orderId: uuid('order_id'), productId: uuid('product_id'), quantity: integer('quantity'), unitPrice: numeric('unit_price',{precision:12,scale:2}) });
+const transactions = pgTable('transactions', { id: uuid('id').primaryKey(), productId: uuid('product_id'), type: varchar('type',{length:20}), quantity: integer('quantity'), notes: text('notes'), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const stockLots = pgTable('stock_lots', { id: uuid('id').primaryKey(), productId: uuid('product_id'), expiryDate: timestamp('expiry_date'), quantity: integer('quantity'), shopId: uuid('shop_id'), createdAt: timestamp('created_at') });
+const appSettings = pgTable('app_settings', { key: varchar('key',{length:100}).primaryKey(), value: text('value'), shopId: uuid('shop_id') });
+
+const TABLE_MAP = { shops, profiles, products, product_variants: productVariants, suppliers, customers, purchase_orders: purchaseOrders, sales_orders: salesOrders, sales_order_items: salesOrderItems, transactions, stock_lots: stockLots, app_settings: appSettings };
+
+// ─── DB connection ─────────────────────────────────────────────────────────────
+function getDb() {
+  return drizzle(neon(process.env.DATABASE_URL));
+}
+
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-dev';
+
+function requireAuth(req, res) {
+  const cookies = cookie.parse(req.headers.cookie || '');
+  const token = cookies.auth_token;
+  if (!token) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  try { return jwt.verify(token, JWT_SECRET); }
+  catch { res.status(401).json({ error: 'Invalid token' }); return null; }
+}
+
+// ─── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
   const user = requireAuth(req, res);
-  if (!user) return; // response already sent
+  if (!user) return;
 
-  const { table, action } = req.query;
-  const dbTable = schema[table]; // e.g. schema.products
+  const { table } = req.query;
+  const dbTable = TABLE_MAP[table];
+  if (!dbTable) return res.status(400).json({ error: `Unknown table: ${table}` });
 
-  if (!dbTable) return res.status(400).json({ error: 'Invalid table' });
+  const db = getDb();
 
   try {
     if (req.method === 'GET') {
       let query = db.select().from(dbTable);
-      
-      // Enforce RLS if table has shopId
-      if (dbTable.shopId) {
-        query = query.where(eq(dbTable.shopId, user.shopId));
-      }
-
-      // Hacky way to support relations specifically for this app
-      if (req.query.join === 'true') {
-        if (table === 'transactions') {
-          query = db.select({
-             id: schema.transactions.id,
-             productId: schema.transactions.productId,
-             type: schema.transactions.type,
-             quantity: schema.transactions.quantity,
-             notes: schema.transactions.notes,
-             createdAt: schema.transactions.createdAt,
-             products: { name: schema.products.name },
-             profiles: { full_name: schema.profiles.fullName }
-          })
-          .from(schema.transactions)
-          .leftJoin(schema.products, eq(schema.transactions.productId, schema.products.id))
-          .leftJoin(schema.profiles, eq(schema.transactions.shopId, schema.profiles.shopId)); // approximation
-        } else if (table === 'sales_orders') {
-          query = db.select({
-             id: schema.salesOrders.id,
-             orderNumber: schema.salesOrders.orderNumber,
-             status: schema.salesOrders.status,
-             subtotal: schema.salesOrders.subtotal,
-             total: schema.salesOrders.total,
-             createdAt: schema.salesOrders.createdAt,
-             customers: { name: schema.customers.name }
-          })
-          .from(schema.salesOrders)
-          .leftJoin(schema.customers, eq(schema.salesOrders.customerId, schema.customers.id));
-        } else if (table === 'purchase_orders') {
-          query = db.select({
-             id: schema.purchaseOrders.id,
-             orderNumber: schema.purchaseOrders.orderNumber,
-             status: schema.purchaseOrders.status,
-             totalCost: schema.purchaseOrders.totalCost,
-             createdAt: schema.purchaseOrders.createdAt,
-             suppliers: { name: schema.suppliers.name },
-             products: { name: schema.products.name, quantity: schema.purchaseOrders.quantity }
-          })
-          .from(schema.purchaseOrders)
-          .leftJoin(schema.suppliers, eq(schema.purchaseOrders.supplierId, schema.suppliers.id))
-          .leftJoin(schema.products, eq(schema.purchaseOrders.productId, schema.products.id));
-        }
-      }
-
-      // Add simple sorts
+      // Enforce shop isolation
+      if (dbTable.shopId) query = query.where(eq(dbTable.shopId, user.shopId));
+      // Order
       if (req.query.order) {
-         query = query.orderBy(req.query.ascending === 'false' ? desc(dbTable[req.query.order]) : asc(dbTable[req.query.order]));
+        const col = dbTable[req.query.order] || dbTable.createdAt;
+        query = query.orderBy(req.query.ascending === 'false' ? desc(col) : asc(col));
       }
-
       const data = await query;
       return res.status(200).json({ data });
     }
 
     if (req.method === 'POST') {
       const payload = { ...req.body };
-      if (dbTable.shopId) payload.shopId = user.shopId; // Enforce RLS
-
+      if (dbTable.shopId) payload.shopId = user.shopId;
       const [data] = await db.insert(dbTable).values(payload).returning();
       return res.status(200).json({ data });
     }
 
     if (req.method === 'PUT') {
       const { id, ...payload } = req.body;
-      const [data] = await db.update(dbTable).set(payload).where(and(eq(dbTable.id, id), dbTable.shopId ? eq(dbTable.shopId, user.shopId) : undefined)).returning();
+      const conditions = [eq(dbTable.id, id)];
+      if (dbTable.shopId) conditions.push(eq(dbTable.shopId, user.shopId));
+      const [data] = await db.update(dbTable).set(payload).where(and(...conditions)).returning();
       return res.status(200).json({ data });
     }
 
     if (req.method === 'DELETE') {
       const { id } = req.query;
-      await db.delete(dbTable).where(and(eq(dbTable.id, id), dbTable.shopId ? eq(dbTable.shopId, user.shopId) : undefined));
+      const conditions = [eq(dbTable.id, id)];
+      if (dbTable.shopId) conditions.push(eq(dbTable.shopId, user.shopId));
+      await db.delete(dbTable).where(and(...conditions));
       return res.status(200).json({ data: null });
     }
 
+    return res.status(405).json({ error: 'Method not allowed' });
   } catch (error) {
-    console.error(error);
+    console.error('[API/db error]', error);
     return res.status(500).json({ error: error.message });
   }
 }

@@ -1,100 +1,174 @@
-import { db } from '../src/db/index.js';
-import { profiles, shops } from '../src/db/schema.js';
+import { neon } from '@neondatabase/serverless';
+import { drizzle } from 'drizzle-orm/neon-http';
+import { pgTable, uuid, varchar, timestamp } from 'drizzle-orm/pg-core';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import cookie from 'cookie';
 
+// ─── Inline schema (self-contained) ───────────────────────────────────────────
+const shops = pgTable('shops', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 50 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+const profiles = pgTable('profiles', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  fullName: varchar('full_name', { length: 255 }),
+  role: varchar('role', { length: 50 }).default('owner').notNull(),
+  shopId: uuid('shop_id'),
+  email: varchar('email', { length: 255 }).notNull(),
+  passwordHash: varchar('password_hash', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// ─── DB connection ─────────────────────────────────────────────────────────────
+function getDb() {
+  const sql = neon(process.env.DATABASE_URL);
+  return drizzle(sql);
+}
+
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-for-dev';
 
+// ─── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
   const { action } = req.query;
+  const db = getDb();
 
   try {
+    // ── SIGNUP ────────────────────────────────────────────────────────────────
     if (req.method === 'POST' && action === 'signup') {
       const { email, password, fullName, shopName } = req.body;
-      
-      const existingUser = await db.select().from(profiles).where(eq(profiles.email, email));
-      if (existingUser.length > 0) return res.status(400).json({ error: 'User already exists' });
 
-      // Generate a shop code (e.g. from shop name)
-      const code = shopName.toLowerCase().replace(/[^a-z0-9]/g, '') + Math.floor(Math.random() * 1000);
-      
-      const [newShop] = await db.insert(shops).values({ name: shopName, code }).returning();
-      
+      if (!email || !password || !fullName) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+
+      // Check for existing user
+      const existing = await db.select({ id: profiles.id })
+        .from(profiles)
+        .where(eq(profiles.email, email.toLowerCase().trim()));
+
+      if (existing.length > 0) {
+        return res.status(400).json({ error: 'An account with this email already exists' });
+      }
+
+      // Create shop
+      const code = (shopName || 'shop').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8)
+        + Math.floor(1000 + Math.random() * 9000);
+      const [newShop] = await db.insert(shops)
+        .values({ name: shopName || `${fullName}'s Shop`, code })
+        .returning();
+
+      // Create profile
       const passwordHash = await bcrypt.hash(password, 10);
-      const [newUser] = await db.insert(profiles).values({
-        email,
-        passwordHash,
-        fullName,
-        role: 'owner',
-        shopId: newShop.id
-      }).returning();
+      const [newUser] = await db.insert(profiles)
+        .values({
+          email: email.toLowerCase().trim(),
+          passwordHash,
+          fullName: fullName.trim(),
+          role: 'owner',
+          shopId: newShop.id,
+        })
+        .returning();
 
-      const token = jwt.sign({ id: newUser.id, role: newUser.role, shopId: newUser.shopId }, JWT_SECRET, { expiresIn: '7d' });
-      res.setHeader('Set-Cookie', cookie.serialize('auth_token', token, { httpOnly: true, path: '/', maxAge: 604800 }));
-      
+      // Issue JWT cookie
+      const token = jwt.sign(
+        { id: newUser.id, role: newUser.role, shopId: newUser.shopId },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+      res.setHeader('Set-Cookie', cookie.serialize('auth_token', token, {
+        httpOnly: true, path: '/', maxAge: 604800, sameSite: 'lax'
+      }));
+
       return res.status(200).json({ user: newUser, shop: newShop });
     }
 
+    // ── LOGIN ─────────────────────────────────────────────────────────────────
     if (req.method === 'POST' && action === 'login') {
       const { email, password } = req.body;
-      const [user] = await db.select().from(profiles).where(eq(profiles.email, email));
-      if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+      const [user] = await db.select().from(profiles)
+        .where(eq(profiles.email, email.toLowerCase().trim()));
+
+      if (!user) return res.status(401).json({ error: 'Invalid email or password' });
 
       const isValid = await bcrypt.compare(password, user.passwordHash);
-      if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+      if (!isValid) return res.status(401).json({ error: 'Invalid email or password' });
 
-      const token = jwt.sign({ id: user.id, role: user.role, shopId: user.shopId }, JWT_SECRET, { expiresIn: '7d' });
-      res.setHeader('Set-Cookie', cookie.serialize('auth_token', token, { httpOnly: true, path: '/', maxAge: 604800 }));
-      
+      const token = jwt.sign(
+        { id: user.id, role: user.role, shopId: user.shopId },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+      res.setHeader('Set-Cookie', cookie.serialize('auth_token', token, {
+        httpOnly: true, path: '/', maxAge: 604800, sameSite: 'lax'
+      }));
+
       return res.status(200).json({ user });
     }
 
+    // ── LOGOUT ────────────────────────────────────────────────────────────────
     if (req.method === 'POST' && action === 'logout') {
-      res.setHeader('Set-Cookie', cookie.serialize('auth_token', '', { httpOnly: true, path: '/', expires: new Date(0) }));
+      res.setHeader('Set-Cookie', cookie.serialize('auth_token', '', {
+        httpOnly: true, path: '/', expires: new Date(0)
+      }));
       return res.status(200).json({ success: true });
     }
 
+    // ── ME (session check) ────────────────────────────────────────────────────
     if (req.method === 'GET' && action === 'me') {
       const cookies = cookie.parse(req.headers.cookie || '');
       const token = cookies.auth_token;
-      if (!token) return res.status(401).json({ user: null });
+      if (!token) return res.status(200).json({ user: null });
 
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        const [user] = await db.select().from(profiles).where(eq(profiles.id, decoded.id));
-        return res.status(200).json({ user });
-      } catch (err) {
-        return res.status(401).json({ user: null });
+        const [user] = await db.select().from(profiles)
+          .where(eq(profiles.id, decoded.id));
+        return res.status(200).json({ user: user || null });
+      } catch {
+        return res.status(200).json({ user: null });
       }
     }
-    
+
+    // ── CREATE SHOPKEEPER ─────────────────────────────────────────────────────
     if (req.method === 'POST' && action === 'create-shopkeeper') {
-      // Must be authenticated as owner
       const cookies = cookie.parse(req.headers.cookie || '');
       const token = cookies.auth_token;
       if (!token) return res.status(401).json({ error: 'Unauthorized' });
-      
+
       const decoded = jwt.verify(token, JWT_SECRET);
       if (decoded.role !== 'owner') return res.status(403).json({ error: 'Forbidden' });
 
       const { email, password, fullName } = req.body;
       const passwordHash = await bcrypt.hash(password, 10);
-      const [newUser] = await db.insert(profiles).values({
-        email,
-        passwordHash,
-        fullName,
-        role: 'shopkeeper',
-        shopId: decoded.shopId
-      }).returning();
+      const [newUser] = await db.insert(profiles)
+        .values({
+          email: email.toLowerCase().trim(),
+          passwordHash,
+          fullName,
+          role: 'shopkeeper',
+          shopId: decoded.shopId,
+        })
+        .returning();
 
       return res.status(200).json({ user: newUser });
     }
 
     return res.status(404).json({ error: 'Not found' });
   } catch (error) {
-    console.error(error);
+    console.error('[API/auth error]', error);
     return res.status(500).json({ error: error.message });
   }
 }
