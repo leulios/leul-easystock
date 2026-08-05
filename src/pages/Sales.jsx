@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, RefreshCw, X, Eye, ShoppingCart, Download, Printer } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { Plus, Search, RefreshCw, X, Eye, ShoppingCart, Printer } from 'lucide-react';
 import { cache } from '../lib/cache';
 import { useAuth } from '../context/AuthContext';
 import { format } from 'date-fns';
@@ -8,8 +7,38 @@ import InvoiceModal from './Invoices';
 import Pagination from '../components/Pagination';
 import BarcodeScanner from '../components/BarcodeScanner';
 
+// ─── helpers ──────────────────────────────────────────────────────────────────
+async function apiGet(table, params = {}) {
+    const qs = new URLSearchParams({ table, ...params }).toString();
+    const res = await fetch(`/api/db?${qs}`);
+    const json = await res.json();
+    return json.data || [];
+}
+
+async function apiPost(table, body) {
+    const res = await fetch(`/api/db?table=${table}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Request failed');
+    return json.data;
+}
+
+async function apiPut(table, body) {
+    const res = await fetch(`/api/db?table=${table}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Request failed');
+    return json.data;
+}
+
+// ─── CreateSaleModal ──────────────────────────────────────────────────────────
 function CreateSaleModal({ onClose, onSaved }) {
-    const { shop } = useAuth();
     const [customers, setCustomers] = useState([]);
     const [products, setProducts] = useState([]);
     const [form, setForm] = useState({
@@ -21,15 +50,10 @@ function CreateSaleModal({ onClose, onSaved }) {
     const [scanMode, setScanMode] = useState(false);
 
     useEffect(() => {
-        async function load() {
-            const [c, p] = await Promise.all([
-                supabase.from('customers').select('*').order('name'),
-                supabase.from('products').select('*').order('name'),
-            ]);
-            setCustomers(c.data || []);
-            setProducts(p.data || []);
-        }
-        load();
+        Promise.all([
+            apiGet('customers'),
+            apiGet('products'),
+        ]).then(([c, p]) => { setCustomers(c); setProducts(p); });
     }, []);
 
     const addItem = () => setForm(f => ({ ...f, items: [...f.items, { product_id: '', product: null, quantity: 1, unit_price: 0 }] }));
@@ -42,7 +66,7 @@ function CreateSaleModal({ onClose, onSaved }) {
             if (key === 'product_id') {
                 const prod = products.find(p => p.id === value);
                 items[i].product = prod || null;
-                items[i].unit_price = prod ? prod.unit_price : 0;
+                items[i].unit_price = prod ? parseFloat(prod.unitPrice || 0) : 0;
             }
             return { ...f, items };
         });
@@ -51,28 +75,15 @@ function CreateSaleModal({ onClose, onSaved }) {
     const handleScan = (sku) => {
         setScanMode(false);
         const prod = products.find(p => p.sku === sku);
-        if (!prod) {
-            alert(`Product with barcode/SKU "${sku}" not found.`);
-            return;
-        }
-
+        if (!prod) { alert(`Product with barcode/SKU "${sku}" not found.`); return; }
         setForm(f => {
             const items = [...f.items];
-            // Check if product is already in the cart
             const existingIndex = items.findIndex(it => it.product_id === prod.id);
             if (existingIndex >= 0) {
                 items[existingIndex].quantity += 1;
             } else {
-                // Remove empty placeholder row if it exists
-                if (items.length === 1 && items[0].product_id === '') {
-                    items.pop();
-                }
-                items.push({
-                    product_id: prod.id,
-                    product: prod,
-                    quantity: 1,
-                    unit_price: prod.unit_price
-                });
+                if (items.length === 1 && items[0].product_id === '') items.pop();
+                items.push({ product_id: prod.id, product: prod, quantity: 1, unit_price: parseFloat(prod.unitPrice || 0) });
             }
             return { ...f, items };
         });
@@ -84,13 +95,8 @@ function CreateSaleModal({ onClose, onSaved }) {
 
     const validate = () => {
         const e = {};
-        const hasInvalidItems = form.items.some(it => !it.product_id || it.quantity < 1);
-        if (hasInvalidItems) e.items = 'All line items must have a valid product and quantity > 0';
-        // Stock check
-        const stockErrors = form.items
-            .filter(it => it.product)
-            .filter(it => it.quantity > it.product.quantity)
-            .map(it => `${it.product.name}: requested ${it.quantity}, available ${it.product.quantity}`);
+        if (form.items.some(it => !it.product_id || it.quantity < 1)) e.items = 'All line items must have a valid product and quantity > 0';
+        const stockErrors = form.items.filter(it => it.product).filter(it => it.quantity > parseInt(it.product.quantity)).map(it => `${it.product.name}: requested ${it.quantity}, available ${it.product.quantity}`);
         if (stockErrors.length) e.stock = stockErrors.join('; ');
         return e;
     };
@@ -99,34 +105,49 @@ function CreateSaleModal({ onClose, onSaved }) {
         const e = validate();
         if (Object.keys(e).length) { setErrors(e); return; }
         setLoading(true);
+        try {
+            const orderNum = `SO-${Date.now()}`;
+            const order = await apiPost('sales_orders', {
+                orderNumber: orderNum,
+                customerId: form.customer_id || null,
+                status: form.payment_status,
+                subtotal, taxRate: parseFloat(form.tax_rate) || 0,
+                taxAmount: taxAmt, total, notes: form.notes || null,
+            });
 
-        const orderNum = `SO-${Date.now()}`;
-        const { data: order, error: orderErr } = await supabase.from('sales_orders').insert({
-            order_number: orderNum,
-            customer_id: form.customer_id || null,
-            status: form.payment_status,
-            subtotal, tax_rate: parseFloat(form.tax_rate) || 0,
-            tax_amount: taxAmt, total, notes: form.notes || null,
-            shop_id: shop?.id ?? null,
-        }).select().single();
+            await Promise.all([
+                ...form.items.map(item =>
+                    apiPost('sales_order_items', {
+                        orderId: order.id,
+                        productId: item.product_id,
+                        quantity: parseInt(item.quantity),
+                        unitPrice: item.unit_price,
+                    })
+                ),
+                ...form.items.map(item =>
+                    apiPost('transactions', {
+                        productId: item.product_id,
+                        type: 'out',
+                        quantity: parseInt(item.quantity),
+                        notes: `Sale ${orderNum}`,
+                    })
+                ),
+                ...form.items.map(item =>
+                    apiPut('products', {
+                        id: item.product_id,
+                        quantity: parseInt(item.product.quantity) - parseInt(item.quantity),
+                    })
+                ),
+            ]);
 
-        if (orderErr) { setErrors({ _: orderErr.message }); setLoading(false); return; }
-
-        // Record stock-out transactions + update product qty — all in parallel
-        await Promise.all(form.items.flatMap(item => [
-            supabase.from('transactions').insert({
-                product_id: item.product_id, type: 'out', quantity: parseInt(item.quantity),
-                notes: `Sale ${orderNum}`, shop_id: shop?.id ?? null,
-            }),
-            supabase.from('products')
-                .update({ quantity: item.product.quantity - parseInt(item.quantity) })
-                .eq('id', item.product_id),
-        ]));
-
-        cache.invalidate('sales_orders', 'products', 'dashboard');
-        setLoading(false);
-        onSaved();
-        onClose();
+            cache.invalidate('sales_orders', 'products', 'dashboard');
+            setLoading(false);
+            onSaved();
+            onClose();
+        } catch (err) {
+            setErrors({ _: err.message });
+            setLoading(false);
+        }
     };
 
     return (
@@ -180,7 +201,7 @@ function CreateSaleModal({ onClose, onSaved }) {
                                                 {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.quantity})</option>)}
                                             </select>
                                             <input type="number" min="1" className="form-control" value={item.quantity}
-                                                onChange={e => updateItem(i, 'quantity', e.target.value)} placeholder="Qty" />
+                                                onChange={e => updateItem(i, 'quantity', parseInt(e.target.value) || 1)} placeholder="Qty" />
                                             <div style={{ padding: '8px 12px', background: 'var(--gray-50)', border: '1px solid var(--gray-200)', borderRadius: 8, fontSize: 13, fontWeight: 600, textAlign: 'right' }}>
                                                 ${(item.quantity * item.unit_price).toFixed(2)}
                                             </div>
@@ -234,22 +255,23 @@ function CreateSaleModal({ onClose, onSaved }) {
     );
 }
 
+// ─── SaleDetailModal ──────────────────────────────────────────────────────────
 function SaleDetailModal({ sale, onClose }) {
     return (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
             <div className="modal modal-md">
                 <div className="modal-header">
                     <div>
-                        <h2 className="modal-title">{sale.order_number || `Order #${sale.id.slice(0, 8)}`}</h2>
-                        <p style={{ fontSize: 12, color: 'var(--gray-500)', marginTop: 2 }}>{format(new Date(sale.created_at), 'MMM d, yyyy HH:mm')}</p>
+                        <h2 className="modal-title">{sale.orderNumber || `Order #${sale.id.slice(0, 8)}`}</h2>
+                        <p style={{ fontSize: 12, color: 'var(--gray-500)', marginTop: 2 }}>{format(new Date(sale.createdAt), 'MMM d, yyyy HH:mm')}</p>
                     </div>
                     <button className="icon-btn" onClick={onClose}><X size={16} /></button>
                 </div>
                 <div className="modal-body">
                     <div className="summary-panel">
-                        <div className="summary-row"><span>Customer</span><span>{sale.customers?.name || 'Walk-in'}</span></div>
+                        <div className="summary-row"><span>Customer</span><span>{sale.customerName || 'Walk-in'}</span></div>
                         <div className="summary-row"><span>Subtotal</span><span className="amount">${parseFloat(sale.subtotal || 0).toFixed(2)}</span></div>
-                        <div className="summary-row"><span>Tax</span><span className="amount">${parseFloat(sale.tax_amount || 0).toFixed(2)}</span></div>
+                        <div className="summary-row"><span>Tax</span><span className="amount">${parseFloat(sale.taxAmount || 0).toFixed(2)}</span></div>
                         <div className="summary-row total"><span>Total</span><span className="amount">${parseFloat(sale.total || 0).toFixed(2)}</span></div>
                     </div>
                     {sale.notes && <div style={{ marginTop: 16, fontSize: 13, color: 'var(--gray-600)' }}><strong>Notes:</strong> {sale.notes}</div>}
@@ -259,6 +281,7 @@ function SaleDetailModal({ sale, onClose }) {
     );
 }
 
+// ─── Main Sales page ──────────────────────────────────────────────────────────
 export default function Sales() {
     const [sales, setSales] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -270,56 +293,46 @@ export default function Sales() {
     const [currentPage, setCurrentPage] = useState(1);
     const ITEMS_PER_PAGE = 30;
     const { isStaff, isOwner, shop } = useAuth();
-    const [notice, setNotice] = useState('');
 
-    // Fetch owner notice once
-    useEffect(() => {
-        supabase.from('app_settings').select('value').eq('key', 'notice').single()
-            .then(({ data }) => setNotice(data?.value || ''));
-    }, []);
+    useEffect(() => { loadSales(); }, []);
 
-    useEffect(() => { fetch(); }, []);
-
-    async function fetch(force = false) {
+    async function loadSales(force = false) {
         if (!force) {
             const cached = cache.get('sales_orders');
             if (cached) { setSales(cached); setLoading(false); return; }
         }
         setLoading(true);
-        const { data } = await supabase
-            .from('sales_orders')
-            .select('*, customers(name)')
-            .order('created_at', { ascending: false });
-        const result = data || [];
-        cache.set('sales_orders', result);
-        setSales(result);
+        try {
+            const [salesData, customersData] = await Promise.all([
+                apiGet('sales_orders'),
+                apiGet('customers'),
+            ]);
+            const customerMap = Object.fromEntries(customersData.map(c => [c.id, c.name]));
+            const enriched = salesData
+                .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                .map(s => ({
+                    ...s,
+                    customerName: s.customerId ? customerMap[s.customerId] || 'Walk-in' : 'Walk-in',
+                }));
+            cache.set('sales_orders', enriched);
+            setSales(enriched);
+        } catch (e) { console.error(e); }
         setLoading(false);
     }
 
-    // Reset page on search or filter
     useEffect(() => { setCurrentPage(1); }, [search, statusFilter]);
 
     const filtered = sales.filter(s => {
-        const matchSearch = (s.order_number || '').toLowerCase().includes(search.toLowerCase()) ||
-            (s.customers?.name || '').toLowerCase().includes(search.toLowerCase());
+        const matchSearch =
+            (s.orderNumber || '').toLowerCase().includes(search.toLowerCase()) ||
+            (s.customerName || '').toLowerCase().includes(search.toLowerCase());
         const matchStatus = !statusFilter || s.status === statusFilter;
         return matchSearch && matchStatus;
     });
 
     const totalPages = Math.ceil(filtered.length / ITEMS_PER_PAGE);
     const paginatedSales = filtered.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
-
-    const totalRevenue = sales.filter(s => s.status === 'paid').reduce((sum, s) => sum + (s.total || 0), 0);
-
-    // Today's snapshot
-    const todayKey = new Date().toISOString().slice(0, 10);
-    const yesterdayKey = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
-    const todaySales = sales.filter(s => s.created_at?.startsWith(todayKey));
-    const yesterdaySales = sales.filter(s => s.created_at?.startsWith(yesterdayKey));
-    const todayRevenue = todaySales.filter(s => s.status === 'paid').reduce((s, o) => s + (o.total || 0), 0);
-    const yesterdayRevenue = yesterdaySales.filter(s => s.status === 'paid').reduce((s, o) => s + (o.total || 0), 0);
-    const revChange = yesterdayRevenue === 0 ? null : ((todayRevenue - yesterdayRevenue) / yesterdayRevenue * 100).toFixed(0);
-    const todayPending = todaySales.filter(s => s.status === 'pending').length;
+    const totalRevenue = sales.filter(s => s.status === 'paid').reduce((sum, s) => sum + parseFloat(s.total || 0), 0);
 
     return (
         <div>
@@ -346,7 +359,7 @@ export default function Sales() {
                             <option value="paid">Paid</option>
                             <option value="cancelled">Cancelled</option>
                         </select>
-                        <button className="btn btn-ghost btn-sm" onClick={fetch}><RefreshCw size={13} /></button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => loadSales(true)}><RefreshCw size={13} /></button>
                     </div>
                 </div>
 
@@ -379,9 +392,9 @@ export default function Sales() {
                                     </td></tr>
                                 ) : paginatedSales.map(s => (
                                     <tr key={s.id}>
-                                        <td><span className="tag">{s.order_number || s.id.slice(0, 8)}</span></td>
-                                        <td>{s.customers?.name || <span style={{ color: 'var(--gray-400)' }}>Walk-in</span>}</td>
-                                        <td style={{ fontSize: 12, color: 'var(--gray-500)' }}>{format(new Date(s.created_at), 'MMM d, yyyy')}</td>
+                                        <td><span className="tag">{s.orderNumber || s.id.slice(0, 8)}</span></td>
+                                        <td>{s.customerName || <span style={{ color: 'var(--gray-400)' }}>Walk-in</span>}</td>
+                                        <td style={{ fontSize: 12, color: 'var(--gray-500)' }}>{format(new Date(s.createdAt), 'MMM d, yyyy')}</td>
                                         <td className="amount">${parseFloat(s.subtotal || 0).toFixed(2)}</td>
                                         <td className="amount" style={{ fontWeight: 600 }}>${parseFloat(s.total || 0).toFixed(2)}</td>
                                         <td><span className={`status-badge ${s.status}`}><span className="status-dot" />{s.status}</span></td>
@@ -406,7 +419,7 @@ export default function Sales() {
                 {!loading && <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={setCurrentPage} totalItems={filtered.length} itemsPerPage={ITEMS_PER_PAGE} />}
             </div>
 
-            {showCreate && <CreateSaleModal onClose={() => setShowCreate(false)} onSaved={fetch} />}
+            {showCreate && <CreateSaleModal onClose={() => setShowCreate(false)} onSaved={() => loadSales(true)} />}
             {viewSale && <SaleDetailModal sale={viewSale} onClose={() => setViewSale(null)} />}
             {printSale && <InvoiceModal sale={printSale} shop={shop} onClose={() => setPrintSale(null)} />}
         </div>
