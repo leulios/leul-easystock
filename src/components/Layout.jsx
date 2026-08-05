@@ -69,8 +69,8 @@ export default function Layout() {
         return () => document.removeEventListener('mousedown', handler);
     }, []);
 
-    const initials = profile?.full_name
-        ? profile.full_name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
+    const initials = profile?.fullName
+        ? profile.fullName.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
         : '?';
 
     return (
@@ -138,7 +138,7 @@ export default function Layout() {
                             <button className="user-menu" onClick={() => setUserMenuOpen(!userMenuOpen)}>
                                 <div className="user-avatar">{initials}</div>
                                 <div className="user-info">
-                                    <div className="user-name">{profile?.full_name || 'User'}</div>
+                                    <div className="user-name">{profile?.fullName || 'User'}</div>
                                     <span className={`role-badge ${profile?.role || 'viewer'}`}>
                                         {profile?.role || 'viewer'}
                                     </span>
@@ -150,7 +150,7 @@ export default function Layout() {
                                 <div className="dropdown-menu">
                                     <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--gray-100)' }}>
                                         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--gray-800)' }}>
-                                            {profile?.full_name}
+                                            {profile?.fullName}
                                         </div>
                                         <div style={{ fontSize: 11, color: 'var(--gray-500)', marginTop: 2 }}>
                                             {profile?.role}
