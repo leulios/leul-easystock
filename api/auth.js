@@ -153,8 +153,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // ── CREATE SHOPKEEPER ──────────────────────────────────────────────────────
-    if (req.method === 'POST' && action === 'create-shopkeeper') {
+    // ── CREATE USER ────────────────────────────────────────────────────────────
+    if (req.method === 'POST' && action === 'create-user') {
       const cookies = parseCookie(req.headers.cookie || '');
       const token = cookies.auth_token;
       if (!token) return res.status(401).json({ error: 'Unauthorized' });
@@ -162,10 +162,23 @@ export default async function handler(req, res) {
       const decoded = jwt.verify(token, JWT_SECRET);
       if (decoded.role !== 'owner') return res.status(403).json({ error: 'Forbidden' });
 
-      const { email, password, fullName } = req.body;
+      const { fullName, password, role, email, employeeId, companyCode } = req.body;
+      const targetRole = role === 'owner' ? 'owner' : 'shopkeeper';
+
+      const userEmail = targetRole === 'owner' 
+        ? email.toLowerCase().trim() 
+        : `emp${employeeId.trim()}@shop${companyCode.trim()}.local`;
+
+      if (!userEmail || !password || !fullName) {
+          return res.status(400).json({ error: 'Missing required fields' });
+      }
+
+      const existing = await db.select({ id: profiles.id }).from(profiles).where(eq(profiles.email, userEmail));
+      if (existing.length > 0) return res.status(400).json({ error: 'User already exists' });
+
       const passwordHash = await bcrypt.hash(password, 10);
       const [newUser] = await db.insert(profiles)
-        .values({ email: email.toLowerCase().trim(), passwordHash, fullName, role: 'shopkeeper', shopId: decoded.shopId })
+        .values({ email: userEmail, passwordHash, fullName, role: targetRole, shopId: decoded.shopId })
         .returning();
 
       return res.status(200).json({ user: newUser });

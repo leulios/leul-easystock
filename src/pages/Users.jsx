@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { Search, RefreshCw, UserPlus, X, Shield, Users as UsersIcon, Copy, CheckCircle, Eye, EyeOff, Building2, Hash } from 'lucide-react';
-import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { format } from 'date-fns';
 
@@ -14,10 +13,16 @@ function CredentialsModal({ credentials, onClose }) {
         setTimeout(() => setCopied(null), 2000);
     };
 
-    const rows = [
-        { label: 'Company Code', value: credentials.company_code, key: 'code', mono: true, highlight: true },
-        { label: 'Full Name', value: credentials.full_name, key: 'name' },
-        { label: 'Employee ID', value: credentials.employee_id, key: 'eid', mono: true },
+    const isOwner = credentials.role === 'owner';
+
+    const rows = isOwner ? [
+        { label: 'Full Name', value: credentials.fullName, key: 'name' },
+        { label: 'Email', value: credentials.email, key: 'email', highlight: true },
+        { label: 'Role', value: 'Owner', key: 'role', mono: true }
+    ] : [
+        { label: 'Company Code', value: credentials.companyCode, key: 'code', mono: true, highlight: true },
+        { label: 'Full Name', value: credentials.fullName, key: 'name' },
+        { label: 'Employee ID', value: credentials.employeeId, key: 'eid', mono: true },
     ];
 
     return (
@@ -27,7 +32,7 @@ function CredentialsModal({ credentials, onClose }) {
                     <div>
                         <h2 className="modal-title">Account Created ✓</h2>
                         <p style={{ fontSize: 12, color: 'var(--gray-500)', marginTop: 2 }}>
-                            Share these credentials with the shopkeeper
+                            Share these credentials with the user
                         </p>
                     </div>
                     <button className="icon-btn" onClick={onClose}><X size={16} /></button>
@@ -35,7 +40,7 @@ function CredentialsModal({ credentials, onClose }) {
                 <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                     <div style={{ background: 'var(--success-light)', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: 'var(--success)', display: 'flex', alignItems: 'center', gap: 6 }}>
                         <CheckCircle size={13} />
-                        Shopkeeper account is ready to use immediately.
+                        Account is ready to use immediately.
                     </div>
 
                     {rows.map(({ label, value, key, mono, highlight }) => (
@@ -89,15 +94,19 @@ function CredentialsModal({ credentials, onClose }) {
     );
 }
 
-function AddShopkeeperModal({ onClose, onSaved, ownerShopId, ownerCompanyCode }) {
-    const [form, setForm] = useState({ full_name: '', password: '' });
+function AddUserModal({ onClose, onSaved, ownerCompanyCode }) {
+    const [form, setForm] = useState({ fullName: '', email: '', password: '', role: 'shopkeeper' });
     const [errors, setErrors] = useState({});
     const [loading, setLoading] = useState(false);
     const [showPass, setShowPass] = useState(false);
 
     const validate = () => {
         const e = {};
-        if (!form.full_name) e.full_name = 'Full name is required';
+        if (!form.fullName) e.fullName = 'Full name is required';
+        if (form.role === 'owner') {
+            if (!form.email) e.email = 'Email is required';
+            else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = 'Invalid email address';
+        }
         if (!form.password || form.password.length < 6) e.password = 'Password must be at least 6 characters';
         return e;
     };
@@ -107,30 +116,39 @@ function AddShopkeeperModal({ onClose, onSaved, ownerShopId, ownerCompanyCode })
         if (Object.keys(e).length) { setErrors(e); return; }
         setLoading(true);
 
-        // Generate a unique 6-digit employee ID
         const employeeId = String(Math.floor(100000 + Math.random() * 900000));
         const shopCode = ownerCompanyCode ?? '000000';
 
-        // Call the Edge Function — uses Admin API server-side so the owner's
-        // session is NEVER replaced by the new shopkeeper's session.
-        const { data, error: fnErr } = await supabase.functions.invoke('create-shopkeeper', {
-            body: {
-                full_name: form.full_name,
-                password: form.password,
-                shop_id: ownerShopId,
-                company_code: shopCode,
-                employee_id: employeeId,
-            },
-        });
+        try {
+            const res = await fetch('/api/auth?action=create-user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: form.email,
+                    password: form.password,
+                    fullName: form.fullName,
+                    role: form.role,
+                    employeeId,
+                    companyCode: shopCode
+                })
+            });
 
-        if (fnErr || data?.error) {
-            setErrors({ _: data?.error ?? fnErr?.message ?? 'Failed to create account.' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to create user');
+
             setLoading(false);
-            return;
+            onSaved({ 
+                fullName: form.fullName, 
+                email: form.email, 
+                password: form.password, 
+                role: form.role,
+                employeeId,
+                companyCode: shopCode
+            });
+        } catch (err) {
+            setErrors({ _: err.message });
+            setLoading(false);
         }
-
-        setLoading(false);
-        onSaved({ full_name: form.full_name, password: form.password, company_code: ownerCompanyCode ?? '—', employee_id: employeeId });
     };
 
     const f = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -140,9 +158,9 @@ function AddShopkeeperModal({ onClose, onSaved, ownerShopId, ownerCompanyCode })
             <div className="modal modal-sm">
                 <div className="modal-header">
                     <div>
-                        <h2 className="modal-title">Add Shopkeeper</h2>
+                        <h2 className="modal-title">Add User</h2>
                         <p style={{ fontSize: 12, color: 'var(--gray-500)', marginTop: 2 }}>
-                            You set their login credentials
+                            Create a new account for your team
                         </p>
                     </div>
                     <button className="icon-btn" onClick={onClose}><X size={16} /></button>
@@ -151,11 +169,28 @@ function AddShopkeeperModal({ onClose, onSaved, ownerShopId, ownerCompanyCode })
                     {errors._ && <div className="alert alert-error">{errors._}</div>}
 
                     <div className="form-group">
-                        <label className="form-label required">Full Name</label>
-                        <input className={`form-control ${errors.full_name ? 'error' : ''}`}
-                            value={form.full_name} onChange={e => f('full_name', e.target.value)} placeholder="e.g. Abebe Kebede" autoFocus />
-                        {errors.full_name && <div className="form-error">{errors.full_name}</div>}
+                        <label className="form-label required">Role</label>
+                        <select className="form-control" value={form.role} onChange={e => { f('role', e.target.value); setErrors({}); }}>
+                            <option value="shopkeeper">Shopkeeper (Logs in via Employee ID)</option>
+                            <option value="owner">Owner (Logs in via Email)</option>
+                        </select>
                     </div>
+
+                    <div className="form-group">
+                        <label className="form-label required">Full Name</label>
+                        <input className={`form-control ${errors.fullName ? 'error' : ''}`}
+                            value={form.fullName} onChange={e => f('fullName', e.target.value)} placeholder="e.g. Abebe Kebede" autoFocus />
+                        {errors.fullName && <div className="form-error">{errors.fullName}</div>}
+                    </div>
+
+                    {form.role === 'owner' && (
+                        <div className="form-group">
+                            <label className="form-label required">Email Address</label>
+                            <input type="email" className={`form-control ${errors.email ? 'error' : ''}`}
+                                value={form.email} onChange={e => f('email', e.target.value)} placeholder="name@example.com" />
+                            {errors.email && <div className="form-error">{errors.email}</div>}
+                        </div>
+                    )}
 
                     <div className="form-group">
                         <label className="form-label required">Password</label>
@@ -171,8 +206,7 @@ function AddShopkeeperModal({ onClose, onSaved, ownerShopId, ownerCompanyCode })
                         {errors.password && <div className="form-error">{errors.password}</div>}
                     </div>
 
-                    {/* Company code info box */}
-                    {ownerCompanyCode && (
+                    {form.role === 'shopkeeper' && ownerCompanyCode && (
                         <div style={{ background: 'linear-gradient(135deg, #eff6ff, #dbeafe)', border: '1px solid #bfdbfe', borderRadius: 8, padding: '10px 12px', fontSize: 12 }}>
                             <div style={{ color: '#3b82f6', fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 5 }}>
                                 <Hash size={11} /> Company Code
@@ -181,15 +215,23 @@ function AddShopkeeperModal({ onClose, onSaved, ownerShopId, ownerCompanyCode })
                                 {ownerCompanyCode}
                             </div>
                             <div style={{ color: '#64748b', marginTop: 4 }}>
-                                The shopkeeper will need this code to sign in.
+                                A unique 6-digit Employee ID will be generated upon creation.
                             </div>
                         </div>
                     )}
 
-                    <div style={{ background: 'var(--primary-50)', border: '1px solid var(--primary-100)', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: 'var(--primary)', marginTop: 8 }}>
-                        <Shield size={12} style={{ display: 'inline', marginRight: 4 }} />
-                        This creates a <strong>Shopkeeper</strong> account — access is limited to Sales only.
-                    </div>
+                    {form.role === 'shopkeeper' && (
+                        <div style={{ background: 'var(--primary-50)', border: '1px solid var(--primary-100)', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: 'var(--primary)', marginTop: 8 }}>
+                            <Shield size={12} style={{ display: 'inline', marginRight: 4 }} />
+                            <strong>Shopkeepers</strong> have limited access. They cannot view reports, users, or settings.
+                        </div>
+                    )}
+                    {form.role === 'owner' && (
+                        <div style={{ background: 'var(--warning-light)', border: '1px solid #fde047', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#b45309', marginTop: 8 }}>
+                            <Shield size={12} style={{ display: 'inline', marginRight: 4 }} />
+                            <strong>Owners</strong> have full access to everything in your shop, including deleting data.
+                        </div>
+                    )}
                 </div>
                 <div className="modal-footer">
                     <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
@@ -215,8 +257,15 @@ export default function Users() {
 
     async function fetchUsers() {
         setLoading(true);
-        const { data } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
-        setProfiles(data || []);
+        try {
+            const res = await fetch('/api/db?table=profiles');
+            const data = await res.json();
+            if (data.data) {
+                setProfiles(data.data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+            }
+        } catch (e) {
+            console.error(e);
+        }
         setLoading(false);
     }
 
@@ -229,7 +278,8 @@ export default function Users() {
     };
 
     const filtered = profiles.filter(p =>
-        (p.full_name || '').toLowerCase().includes(search.toLowerCase())
+        (p.fullName || '').toLowerCase().includes(search.toLowerCase()) || 
+        (p.email || '').toLowerCase().includes(search.toLowerCase())
     );
 
     return (
@@ -237,11 +287,11 @@ export default function Users() {
             <div className="page-header">
                 <div className="page-header-left">
                     <h1>Users &amp; Roles</h1>
-                    <p>Owner-only · Create and manage shopkeeper accounts</p>
+                    <p>Owner-only · Create and manage team accounts</p>
                 </div>
                 <div className="page-header-actions">
                     <button className="btn btn-primary btn-sm" onClick={() => setShowAdd(true)}>
-                        <UserPlus size={13} /> Add Shopkeeper
+                        <UserPlus size={13} /> Add User
                     </button>
                 </div>
             </div>
@@ -306,8 +356,7 @@ export default function Users() {
                                     <tr><td colSpan={3}>
                                         <div className="empty-state">
                                             <UsersIcon className="empty-state-icon" />
-                                            <h3>No users yet</h3>
-                                            <p>Add shopkeepers to grant them access.</p>
+                                            <h3>No users found</h3>
                                         </div>
                                     </td></tr>
                                 ) : filtered.map(p => (
@@ -315,17 +364,19 @@ export default function Users() {
                                         <td>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                                 <div style={{ width: 32, height: 32, borderRadius: '50%', background: p.role === 'owner' ? 'linear-gradient(135deg, #3b82f6, #1e40af)' : 'linear-gradient(135deg, #10b981, #059669)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: 12, fontWeight: 700 }}>
-                                                    {(p.full_name || '?')[0].toUpperCase()}
+                                                    {(p.fullName || '?')[0].toUpperCase()}
                                                 </div>
                                                 <div>
-                                                    <div style={{ fontWeight: 600 }}>{p.full_name || 'Unnamed User'}</div>
-                                                    <div style={{ fontSize: 11, color: 'var(--gray-400)' }}>ID: {p.id.slice(0, 8)}</div>
+                                                    <div style={{ fontWeight: 600 }}>{p.fullName || 'Unnamed User'}</div>
+                                                    <div style={{ fontSize: 11, color: 'var(--gray-400)' }}>
+                                                        {p.role === 'owner' ? p.email : `EMP ID: ${p.email.match(/emp(\d+)/)?.[1] || 'Unknown'}`}
+                                                    </div>
                                                 </div>
                                             </div>
                                         </td>
                                         <td><span className={`role-badge ${p.role}`}>{p.role}</span></td>
                                         <td style={{ fontSize: 12, color: 'var(--gray-500)' }}>
-                                            {p.created_at ? format(new Date(p.created_at), 'MMM d, yyyy') : '—'}
+                                            {p.createdAt ? format(new Date(p.createdAt), 'MMM d, yyyy') : '—'}
                                         </td>
                                     </tr>
                                 ))}
@@ -336,14 +387,13 @@ export default function Users() {
             </div>
 
             {showAdd && (
-                <AddShopkeeperModal
+                <AddUserModal
                     onClose={() => setShowAdd(false)}
                     onSaved={(creds) => {
                         setShowAdd(false);
                         fetchUsers();
                         setCredentials(creds);
                     }}
-                    ownerShopId={profile?.shop_id ?? null}
                     ownerCompanyCode={shop?.code ?? null}
                 />
             )}
